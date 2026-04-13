@@ -1,0 +1,13 @@
+project_id = "dcbfzwzrqffyjmptmjgh"
+
+[functions.process-food-image]
+verify_jwt = false
+
+[functions.delete-photo]
+verify_jwt = false
+
+[functions.manage-users]
+verify_jwt = false
+
+[functions.kiwify-webhook]
+verify_jwt = false
