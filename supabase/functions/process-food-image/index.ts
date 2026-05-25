@@ -41,9 +41,14 @@ function getCorsHeaders(req: Request) {
 
 const TIMEOUT_MS = 55_000;
 const GEMINI_MODEL = Deno.env.get("GEMINI_IMAGE_MODEL") || "gemini-3.1-flash-image-preview";
+const FALLBACK_GEMINI_MODELS = (Deno.env.get("GEMINI_IMAGE_FALLBACK_MODELS") || "gemini-2.5-flash-image")
+  .split(",")
+  .map((model) => model.trim())
+  .filter(Boolean);
 const FLOW_REFERENCE_KEY = "__flow_reference";
 const FLOW_COMBO_KEY = "__flow_combo";
 const FLOW_PRESET_KEY = "__flow_preset";
+const MAX_REMOTE_IMAGE_BYTES = 12 * 1024 * 1024;
 
 interface GeminiResponse {
   candidates?: Array<{
@@ -60,7 +65,104 @@ interface GeminiResponse {
   }>;
 }
 
-type CreateMode = "reference" | "combo" | "preset";
+type CreateMode = "reference" | "combo" | "preset" | "menu_item";
+
+type GeminiPart = { text?: string; inline_data?: { mime_type: string; data: string } };
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isTransientGeminiStatus(status: number) {
+  return [429, 500, 502, 503, 504].includes(status);
+}
+
+function buildGeminiPayload(parts: GeminiPart[], includeGenerationConfig = false) {
+  const payload: {
+    contents: Array<{ role: "user"; parts: GeminiPart[] }>;
+    generationConfig?: { responseModalities: string[] };
+  } = {
+    contents: [{ role: "user", parts }],
+  };
+
+  if (includeGenerationConfig) {
+    payload.generationConfig = {
+      responseModalities: ["TEXT", "IMAGE"],
+    };
+  }
+
+  return payload;
+}
+
+async function callGeminiWithRetry(apiKey: string, parts: GeminiPart[]) {
+  const models = Array.from(new Set([GEMINI_MODEL, ...FALLBACK_GEMINI_MODELS]));
+  let lastErrorBody = "";
+  let lastStatus = 500;
+
+  for (const model of models) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
+
+      try {
+        const response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "x-goog-api-key": apiKey,
+            },
+            body: JSON.stringify(buildGeminiPayload(parts, false)),
+            signal: controller.signal,
+          },
+        );
+
+        if (response.ok) return response;
+
+        lastStatus = response.status;
+        lastErrorBody = await response.text();
+        console.error("Gemini API error:", response.status, model, lastErrorBody);
+
+        if (response.status === 400) {
+          const minimalResponse = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "x-goog-api-key": apiKey,
+              },
+              body: JSON.stringify(buildGeminiPayload(parts, true)),
+            },
+          );
+
+          if (minimalResponse.ok) return minimalResponse;
+
+          lastStatus = minimalResponse.status;
+          lastErrorBody = await minimalResponse.text();
+          console.error("Gemini minimal payload error:", minimalResponse.status, model, lastErrorBody);
+        }
+
+        if (!isTransientGeminiStatus(lastStatus)) break;
+        await sleep(800 * (attempt + 1));
+      } catch (error) {
+        lastStatus = error instanceof DOMException && error.name === "AbortError" ? 504 : 503;
+        lastErrorBody = error instanceof Error ? error.message : "Erro de rede ao chamar Gemini";
+        console.error("Gemini request exception:", model, lastErrorBody);
+        await sleep(800 * (attempt + 1));
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    }
+  }
+
+  return {
+    ok: false,
+    status: lastStatus,
+    errorBody: lastErrorBody,
+  };
+}
 
 function imageMimeTypeFromDataUrl(value: string) {
   const match = value.match(/^data:([^;]+);base64,/);
@@ -74,6 +176,60 @@ function imagePartFromDataUrl(value: string) {
       data: value.split(",")[1] || value,
     },
   };
+}
+
+function uint8ArrayToBase64(bytes: Uint8Array) {
+  let binary = "";
+  const chunkSize = 0x8000;
+
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+
+  return btoa(binary);
+}
+
+async function imagePartFromRemoteUrl(value: string) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 20_000);
+
+  try {
+    const response = await fetch(value, {
+      headers: {
+        Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        "User-Agent": "Mozilla/5.0 (compatible; CardapioProIA/1.0; +https://cardapioproia.com.br)",
+      },
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(`Imagem do item retornou HTTP ${response.status}`);
+    }
+
+    const contentType = response.headers.get("content-type")?.split(";")[0] || "image/jpeg";
+    if (!contentType.startsWith("image/")) {
+      throw new Error("URL do item não retornou uma imagem válida");
+    }
+
+    const contentLength = Number(response.headers.get("content-length") || "0");
+    if (contentLength > MAX_REMOTE_IMAGE_BYTES) {
+      throw new Error("Imagem do item muito grande");
+    }
+
+    const buffer = await response.arrayBuffer();
+    if (buffer.byteLength > MAX_REMOTE_IMAGE_BYTES) {
+      throw new Error("Imagem do item muito grande");
+    }
+
+    return {
+      inline_data: {
+        mime_type: contentType,
+        data: uint8ArrayToBase64(new Uint8Array(buffer)),
+      },
+    };
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 function getPatternInstructions(pattern: string, customPrompts: Record<string, string>) {
@@ -105,6 +261,7 @@ function getPatternInstructions(pattern: string, customPrompts: Record<string, s
 
 serve(async (req) => {
   const corsHeaders = getCorsHeaders(req);
+  const startedAt = performance.now();
 
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
@@ -118,6 +275,10 @@ serve(async (req) => {
       pattern = "auto",
       feedback,
       mode = "reference",
+      itemName,
+      itemDescription,
+      sourceImageUrl,
+      restaurantUrl,
     } = await req.json() as {
       productImage?: string;
       referenceImage?: string;
@@ -125,6 +286,10 @@ serve(async (req) => {
       pattern?: string;
       feedback?: string;
       mode?: CreateMode;
+      itemName?: string;
+      itemDescription?: string;
+      sourceImageUrl?: string;
+      restaurantUrl?: string;
     };
 
     if (mode === "reference" && (!productImage || !referenceImage)) {
@@ -144,6 +309,13 @@ serve(async (req) => {
     if (mode === "preset" && !productImage) {
       return new Response(
         JSON.stringify({ error: "A foto do produto é obrigatória para o preset" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+
+    if (mode === "menu_item" && (!sourceImageUrl || !itemName || !referenceImage)) {
+      return new Response(
+        JSON.stringify({ error: "Selecione um item do cardápio e envie uma imagem de referência para gerar a foto" }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
     }
@@ -193,11 +365,34 @@ serve(async (req) => {
 
     const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
-    const { data: profileData, error: profileError } = await adminClient
-      .from("user_profiles")
-      .select("role, is_active")
-      .eq("user_id", authenticatedUserId)
-      .maybeSingle();
+    const dbStartedAt = performance.now();
+    const [
+      { data: profileData, error: profileError },
+      { data: subscriptionData, error: subscriptionError },
+      { data: creditData, error: creditError },
+      { data: promptsData, error: promptsError },
+    ] = await Promise.all([
+      adminClient
+        .from("user_profiles")
+        .select("role, is_active")
+        .eq("user_id", authenticatedUserId)
+        .maybeSingle(),
+      adminClient
+        .from("user_subscriptions")
+        .select("status")
+        .eq("user_id", authenticatedUserId)
+        .maybeSingle(),
+      adminClient
+        .from("user_credits")
+        .select("credits")
+        .eq("user_id", authenticatedUserId)
+        .maybeSingle(),
+      adminClient
+        .from("prompts_config")
+        .select("universal_prompt, pattern_prompts")
+        .eq("user_id", authenticatedUserId)
+        .maybeSingle(),
+    ]);
 
     if (profileError && profileError.code !== "PGRST116") {
       console.error("Erro ao buscar perfil:", profileError);
@@ -205,6 +400,26 @@ serve(async (req) => {
         JSON.stringify({ error: "Não foi possível validar seu perfil." }),
         { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
+    }
+
+    if (subscriptionError && subscriptionError.code !== "PGRST116") {
+      console.error("Erro ao buscar assinatura:", subscriptionError);
+      return new Response(
+        JSON.stringify({ error: "Não foi possível validar sua assinatura." }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+
+    if (creditError && creditError.code !== "PGRST116") {
+      console.error("Erro ao buscar créditos:", creditError);
+      return new Response(
+        JSON.stringify({ error: "Não foi possível validar seus créditos." }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+
+    if (promptsError && promptsError.code !== "PGRST116") {
+      console.warn("Erro ao buscar prompts customizados:", promptsError);
     }
 
     if (profileData?.is_active === false) {
@@ -216,38 +431,10 @@ serve(async (req) => {
 
     const isAdmin = profileData?.role === "admin";
 
-    const { data: subscriptionData, error: subscriptionError } = await adminClient
-      .from("user_subscriptions")
-      .select("status")
-      .eq("user_id", authenticatedUserId)
-      .maybeSingle();
-
-    if (subscriptionError && subscriptionError.code !== "PGRST116") {
-      console.error("Erro ao buscar assinatura:", subscriptionError);
-      return new Response(
-        JSON.stringify({ error: "Não foi possível validar sua assinatura." }),
-        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-      );
-    }
-
     if (!isAdmin && subscriptionData?.status === "canceled") {
       return new Response(
         JSON.stringify({ error: "Seu plano está cancelado. Regularize a assinatura para continuar." }),
         { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-      );
-    }
-
-    const { data: creditData, error: creditError } = await adminClient
-      .from("user_credits")
-      .select("credits")
-      .eq("user_id", authenticatedUserId)
-      .maybeSingle();
-
-    if (creditError && creditError.code !== "PGRST116") {
-      console.error("Erro ao buscar créditos:", creditError);
-      return new Response(
-        JSON.stringify({ error: "Não foi possível validar seus créditos." }),
-        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
     }
 
@@ -258,26 +445,14 @@ serve(async (req) => {
       );
     }
 
+    console.log("process-food-image db checks ms:", Math.round(performance.now() - dbStartedAt));
+
     let universalPromptCustom = "";
     let patternPromptsCustom: Record<string, string> = {};
 
-    if (authenticatedUserId) {
-      try {
-        const { data: promptsData, error: promptsError } = await adminClient
-          .from("prompts_config")
-          .select("universal_prompt, pattern_prompts")
-          .eq("user_id", authenticatedUserId)
-          .maybeSingle();
-
-        if (promptsError) throw promptsError;
-
-        if (promptsData) {
-          universalPromptCustom = promptsData.universal_prompt || "";
-          patternPromptsCustom = promptsData.pattern_prompts || {};
-        }
-      } catch (e) {
-        console.warn("Erro ao buscar prompts customizados:", e);
-      }
+    if (promptsData) {
+      universalPromptCustom = promptsData.universal_prompt || "";
+      patternPromptsCustom = promptsData.pattern_prompts || {};
     }
 
     const patternInstructions = getPatternInstructions(pattern, patternPromptsCustom);
@@ -356,12 +531,28 @@ REGRAS:
 - destaque textura, frescor e contraste do alimento
 - centralize o produto com enquadramento adequado para cardápio`;
 
+    const DEFAULT_MENU_ITEM_PROMPT = `Você é um especialista em fotografia gastronômica para delivery. Sua tarefa é transformar a foto de um item importado do cardápio do iFood em uma imagem profissional, realista e altamente atrativa para venda online.
+
+CONTEXTO DO ITEM:
+- Use o nome e a descrição do item apenas para entender o produto.
+- A primeira imagem enviada é a foto original do item importado do iFood e deve ser preservada.
+- A segunda imagem enviada é a referência visual para estilo, luz, fundo, ângulo e composição.
+
+REGRAS PRINCIPAIS:
+- mantenha o tipo, formato e ingredientes aparentes do produto original
+- melhore nitidez, resolução, luz, contraste e cores
+- remova poluição visual, embalagens ruins, sombras duras e imperfeições
+- deixe o alimento mais apetitoso sem criar elementos irreais
+- siga a referência visual sem trocar o produto original
+- crie fundo limpo e composição comercial pronta para cardápio de delivery
+- resultado final horizontal, profissional e focado no item`;
+
     const referencePrompt = patternPromptsCustom[FLOW_REFERENCE_KEY] || universalPromptCustom || DEFAULT_REFERENCE_PROMPT;
     const comboPrompt = patternPromptsCustom[FLOW_COMBO_KEY] || DEFAULT_COMBO_PROMPT;
     const presetPrompt = patternPromptsCustom[FLOW_PRESET_KEY] || DEFAULT_PRESET_PROMPT;
 
     let prompt = "";
-    const parts: Array<{ text?: string; inline_data?: { mime_type: string; data: string } }> = [];
+    const parts: GeminiPart[] = [];
 
     if (mode === "reference") {
       prompt = `${referencePrompt}\n\nPADRÃO ESPECÍFICO DO RESTAURANTE:\n${patternInstructions}`;
@@ -382,10 +573,31 @@ INSTRUÇÃO EXTRA:
         parts.push({ text: `IMAGEM ${index + 1}: produto do combo para ser integrado na composição final.` });
         parts.push(imagePartFromDataUrl(image));
       });
-    } else {
+    } else if (mode === "preset") {
       prompt = `${presetPrompt}\n\nPRESET VISUAL ESCOLHIDO:\n${patternInstructions}`;
       parts.push({ text: prompt });
       parts.push(imagePartFromDataUrl(productImage!));
+    } else {
+      prompt = `${DEFAULT_MENU_ITEM_PROMPT}
+
+ITEM SELECIONADO:
+- Nome: ${itemName}
+- Descrição: ${itemDescription || "Sem descrição informada"}
+- Link do restaurante: ${restaurantUrl || "Não informado"}
+
+PADRÃO VISUAL:
+${patternInstructions}`;
+      parts.push({ text: prompt });
+      try {
+        parts.push(await imagePartFromRemoteUrl(sourceImageUrl!));
+        parts.push(imagePartFromDataUrl(referenceImage!));
+      } catch (imageError) {
+        console.error("Menu item image fetch error:", imageError);
+        return new Response(
+          JSON.stringify({ error: "Não foi possível carregar as imagens do item selecionado." }),
+          { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        );
+      }
     }
 
     if (feedback && feedback.trim()) {
@@ -393,50 +605,28 @@ INSTRUÇÃO EXTRA:
       parts[0] = { text: prompt };
     }
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
-
-    let response: Response;
-    try {
-      response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-goog-api-key": GEMINI_API_KEY,
-          },
-          body: JSON.stringify({
-            contents: [{ role: "user", parts }],
-            generationConfig: {
-              responseModalities: ["TEXT", "IMAGE"],
-              imageConfig: {
-                aspectRatio: "4:3",
-                imageSize: "1K",
-              },
-            },
-          }),
-          signal: controller.signal,
-        },
-      );
-    } finally {
-      clearTimeout(timeoutId);
-    }
+    const geminiStartedAt = performance.now();
+    const response = await callGeminiWithRetry(GEMINI_API_KEY, parts);
+    console.log("process-food-image gemini ms:", Math.round(performance.now() - geminiStartedAt));
 
     if (!response.ok) {
-      const errorBody = await response.text();
-      console.error("Gemini API error:", response.status, errorBody);
+      const responseStatus = response instanceof Response ? response.status : response.status;
+      const errorBody = response instanceof Response ? await response.text() : response.errorBody;
+      console.error("Gemini API final error:", responseStatus, errorBody);
 
       return new Response(
         JSON.stringify({
-          error: "A API de imagem recusou a solicitação. Tente outra imagem ou tente novamente.",
-          details: `Gemini API Error: ${response.status}`,
+          error:
+            responseStatus === 503 || responseStatus === 504
+              ? "A API de imagem está instável no momento. Tente novamente em instantes."
+              : "A API de imagem recusou a solicitação. Tente outra imagem ou tente novamente.",
+          details: `Gemini API Error: ${responseStatus}`,
         }),
-        { status: response.status, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        { status: responseStatus, headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
     }
 
-    const data = await response.json() as GeminiResponse;
+    const data = await (response as Response).json() as GeminiResponse;
     const imagePart = data.candidates?.[0]?.content?.parts?.find((part) => part.inlineData?.data || part.inline_data?.data);
     const imageData = imagePart?.inlineData?.data || imagePart?.inline_data?.data;
 
@@ -463,7 +653,31 @@ INSTRUÇÃO EXTRA:
           { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } },
         );
       }
+
+      const { data: updatedCreditData } = await adminClient
+        .from("user_credits")
+        .select("credits")
+        .eq("user_id", authenticatedUserId)
+        .maybeSingle();
+
+      const { error: transactionError } = await adminClient.from("credit_transactions").insert({
+        user_id: authenticatedUserId,
+        amount: -1,
+        balance_after: Number(updatedCreditData?.credits) || 0,
+        reason: "image_generation",
+        reference_type: "process-food-image",
+        metadata: {
+          mode,
+          pattern,
+        },
+      });
+
+      if (transactionError) {
+        console.error("Credit transaction log error:", transactionError);
+      }
     }
+
+    console.log("process-food-image total ms:", Math.round(performance.now() - startedAt));
 
     return new Response(
       JSON.stringify({ image: resultDataUrl, creditsDebited: !isAdmin }),
@@ -472,7 +686,10 @@ INSTRUÇÃO EXTRA:
   } catch (e) {
     console.error("Error:", e);
     return new Response(
-      JSON.stringify({ error: e instanceof Error ? e.message : "Erro desconhecido" }),
+      JSON.stringify({
+        error: "Erro interno ao processar a imagem. Tente novamente em instantes.",
+        details: e instanceof Error ? e.message : String(e),
+      }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
   }

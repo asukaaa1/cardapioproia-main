@@ -6,14 +6,12 @@ export interface Adjustments {
   brightness: number;
   contrast: number;
   saturation: number;
-  sharpness: number;
 }
 
 export const defaultAdjustments: Adjustments = {
   brightness: 100,
   contrast: 100,
   saturation: 100,
-  sharpness: 0,
 };
 
 export function buildFilterStyle(adj: Adjustments): React.CSSProperties {
@@ -58,7 +56,7 @@ export function ImageAdjustments({ value, onChange }: ImageAdjustmentsProps) {
         <div key={key} className="space-y-1.5">
           <div className="flex justify-between text-xs text-muted-foreground">
             <span>{label}</span>
-            <span>{value[key]}{key !== "sharpness" ? "%" : ""}</span>
+            <span>{value[key]}%</span>
           </div>
           <Slider
             min={min}

@@ -65,7 +65,7 @@ SELECT
   users.id,
   COALESCE(users.email, ''),
   NULLIF(users.raw_user_meta_data ->> 'full_name', ''),
-  'user',
+  'admin',
   TRUE,
   FALSE,
   COALESCE(users.created_at, NOW()),

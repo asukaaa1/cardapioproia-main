@@ -19,7 +19,25 @@ export default tseslint.config(
     },
     rules: {
       ...reactHooks.configs.recommended.rules,
-      "react-refresh/only-export-components": ["warn", { allowConstantExport: true }],
+      "react-refresh/only-export-components": [
+        "warn",
+        {
+          allowConstantExport: true,
+          allowExportNames: [
+            "badgeVariants",
+            "buildFilterStyle",
+            "buttonVariants",
+            "defaultAdjustments",
+            "navigationMenuTriggerStyle",
+            "toast",
+            "toggleVariants",
+            "useAuth",
+            "useFormField",
+            "useSidebar",
+            "useTheme",
+          ],
+        },
+      ],
       "@typescript-eslint/no-unused-vars": "off",
     },
   },

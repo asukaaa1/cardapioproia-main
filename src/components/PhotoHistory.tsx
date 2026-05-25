@@ -17,8 +17,13 @@ import type { Tables } from "@/integrations/supabase/types";
 import { toast } from "sonner";
 import { recordDownload } from "@/lib/usageMetrics";
 import { getEdgeFunctionUrl } from "@/lib/edgeFunctions";
+import { resolveImageUrl } from "@/lib/imageStorage";
 
 type PhotoRecord = Tables<"photo_history">;
+type DisplayPhotoRecord = PhotoRecord & {
+  display_original_image_url: string;
+  display_result_image_url: string;
+};
 
 const PAGE_SIZE = 12;
 
@@ -79,7 +84,7 @@ const PhotoHistory = ({ onSelectPhoto, refreshTrigger, showExpired = false }: Ph
   const queryClient = useQueryClient();
   const sessionId = getSessionId();
   const [page, setPage] = useState(0);
-  const [selectedPhoto, setSelectedPhoto] = useState<PhotoRecord | null>(null);
+  const [selectedPhoto, setSelectedPhoto] = useState<DisplayPhotoRecord | null>(null);
 
   const { data, error, isLoading } = useQuery({
     queryKey: ["photo_history", user?.id ?? sessionId, page, showExpired, refreshTrigger],
@@ -105,7 +110,15 @@ const PhotoHistory = ({ onSelectPhoto, refreshTrigger, showExpired = false }: Ph
 
       const { data, error, count } = await query;
       if (error) throw error;
-      return { photos: data ?? [], total: count ?? 0 };
+      const photos = await Promise.all(
+        ((data ?? []) as PhotoRecord[]).map(async (photo) => ({
+          ...photo,
+          display_original_image_url: await resolveImageUrl(photo.original_image_url),
+          display_result_image_url: await resolveImageUrl(photo.result_image_url),
+        })),
+      );
+
+      return { photos, total: count ?? 0 };
     },
     staleTime: 30_000,
   });
@@ -180,17 +193,17 @@ const PhotoHistory = ({ onSelectPhoto, refreshTrigger, showExpired = false }: Ph
     }
   };
 
-  const handleDownload = (photo: PhotoRecord) => {
+  const handleDownload = (photo: DisplayPhotoRecord) => {
     void recordDownload(photo.id, user?.id ?? null)
       .then(() => {
         queryClient.invalidateQueries({ queryKey: ["dashboard-home"] });
       })
       .catch((error) => {
         console.error("Download metric error:", error);
-      });
+    });
 
     const link = document.createElement("a");
-    link.href = photo.result_image_url;
+    link.href = photo.display_result_image_url;
     link.download = "foto-delivery-pro.png";
     link.click();
   };
@@ -248,12 +261,12 @@ const PhotoHistory = ({ onSelectPhoto, refreshTrigger, showExpired = false }: Ph
       ) : (
         <>
           <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-3">
-            {photos.map((photo: PhotoRecord) => (
+            {photos.map((photo: DisplayPhotoRecord) => (
               <div
                 key={photo.id}
                 className="group rounded-[1.7rem] border border-border/70 bg-card/50 p-4 transition-all hover:border-border hover:bg-card/70"
                 onClick={() => {
-                  onSelectPhoto(photo.original_image_url, photo.result_image_url);
+                  onSelectPhoto(photo.display_original_image_url, photo.display_result_image_url);
                   setSelectedPhoto(photo);
                 }}
               >
@@ -261,7 +274,7 @@ const PhotoHistory = ({ onSelectPhoto, refreshTrigger, showExpired = false }: Ph
                   <div className="grid grid-cols-2">
                     <div className="relative">
                       <img
-                        src={photo.original_image_url}
+                        src={photo.display_original_image_url}
                         alt="Foto original"
                         className="aspect-[4/4.15] w-full object-cover"
                         loading="lazy"
@@ -269,7 +282,7 @@ const PhotoHistory = ({ onSelectPhoto, refreshTrigger, showExpired = false }: Ph
                     </div>
                     <div className="relative">
                       <img
-                        src={photo.result_image_url}
+                        src={photo.display_result_image_url}
                         alt="Foto processada"
                         className="aspect-[4/4.15] w-full object-cover"
                         loading="lazy"
@@ -384,8 +397,8 @@ const PhotoHistory = ({ onSelectPhoto, refreshTrigger, showExpired = false }: Ph
           {selectedPhoto && (
             <div className="space-y-4">
               <BeforeAfterSlider
-                before={selectedPhoto.original_image_url}
-                after={selectedPhoto.result_image_url}
+                before={selectedPhoto.display_original_image_url}
+                after={selectedPhoto.display_result_image_url}
               />
 
               <div className="flex items-center justify-end gap-2">

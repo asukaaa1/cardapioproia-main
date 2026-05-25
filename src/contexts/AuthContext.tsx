@@ -2,6 +2,8 @@ import { createContext, useContext, useEffect, useState } from "react";
 import { Session, User } from "@supabase/supabase-js";
 import { supabase } from "@/integrations/supabase/client";
 import type { Tables } from "@/integrations/supabase/types";
+import { getEdgeFunctionUrl } from "@/lib/edgeFunctions";
+import { getSessionHeaders } from "@/lib/supabaseHeaders";
 
 type UserProfile = Tables<"user_profiles">;
 
@@ -26,6 +28,28 @@ const AuthContext = createContext<AuthContextValue>({
   signOut: async () => {},
   refreshProfile: async () => {},
 });
+
+async function claimFreeCredits(session: Session | null) {
+  if (!session?.access_token) return;
+
+  try {
+    await fetch(getEdgeFunctionUrl("claim-free-credits"), {
+      method: "POST",
+      headers: getSessionHeaders({
+        "Content-Type": "application/json",
+        apikey: import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY,
+        Authorization: `Bearer ${session.access_token}`,
+      }),
+      body: JSON.stringify({}),
+    });
+  } catch (error) {
+    console.warn("Free credits claim skipped:", error);
+  }
+}
+
+function getAuthRedirectUrl() {
+  return `${window.location.origin}/login`;
+}
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
@@ -67,6 +91,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setSession(session);
       setUser(session?.user ?? null);
       await loadProfile(session?.user ?? null);
+      await claimFreeCredits(session);
       setLoading(false);
     });
 
@@ -75,6 +100,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setSession(session);
         setUser(session?.user ?? null);
         await loadProfile(session?.user ?? null);
+        await claimFreeCredits(session);
         setLoading(false);
       })();
     });
@@ -95,6 +121,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (!accessAllowed) {
           return { error: new Error("Seu acesso está desativado no momento.") };
         }
+        await claimFreeCredits(data.session);
         setSession(data.session);
         setUser(data.session.user);
       }
@@ -112,10 +139,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signUp = async ({ email, password, fullName }: { email: string; password: string; fullName?: string }) => {
     try {
-      const { error } = await supabase.auth.signUp({
+      const { data, error } = await supabase.auth.signUp({
         email,
         password,
         options: {
+          emailRedirectTo: getAuthRedirectUrl(),
           data: {
             full_name: fullName?.trim() || undefined,
           },
@@ -125,6 +153,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (error) {
         console.error("Sign up error:", error);
         return { error: error as Error };
+      }
+
+      if (data.session) {
+        await claimFreeCredits(data.session);
       }
 
       return { error: null };

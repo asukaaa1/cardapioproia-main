@@ -1,5 +1,4 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { buildLoginRedirectUrl, extractWebhookToken, hasExpectedSecret } from "../_shared/security.ts";
 
 const securityHeaders = {
   "X-Content-Type-Options": "nosniff",
@@ -8,17 +7,25 @@ const securityHeaders = {
   "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
 };
 
-const DEFAULT_ALLOWED_ORIGINS = [
-  "https://cardapioproia.vercel.app",
-  "https://cardapioproia.com.br",
-  "https://www.cardapioproia.com.br",
-];
+const corsHeaders = {
+  ...securityHeaders,
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, content-type, x-webhook-token, x-kiwify-token, x-kiwify-signature",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+};
 
 type KiwifyEvent = {
   id?: string;
   event_id?: string;
   event?: string;
+  webhook_event_type?: string;
+  order_status?: string;
   customer?: {
+    email?: string;
+    name?: string;
+    full_name?: string;
+  };
+  Customer?: {
     email?: string;
     name?: string;
     full_name?: string;
@@ -27,42 +34,26 @@ type KiwifyEvent = {
     id?: string;
     name?: string;
   };
+  Product?: {
+    product_id?: string;
+    product_name?: string;
+    id?: string;
+    name?: string;
+  };
   order?: {
     id?: string;
   };
+  order_id?: string;
+  order_ref?: string;
   subscription?: {
     id?: string;
   };
+  subscription_id?: string;
+  checkout_link?: string;
   [key: string]: unknown;
 };
 
-function getCorsHeaders(req: Request) {
-  const requestOrigin = req.headers.get("origin");
-  const configuredOrigins = [
-    Deno.env.get("APP_URL"),
-    ...(Deno.env.get("ALLOWED_ORIGIN") || "").split(","),
-  ]
-    .map((origin) => origin?.trim())
-    .filter(Boolean) as string[];
-  const allowedOrigins = Array.from(new Set([...configuredOrigins, ...DEFAULT_ALLOWED_ORIGINS]));
-  const isLocalOrigin =
-    requestOrigin?.startsWith("http://localhost:") ||
-    requestOrigin?.startsWith("http://127.0.0.1:");
-  const allowedOrigin =
-    isLocalOrigin || (requestOrigin && allowedOrigins.includes(requestOrigin))
-      ? requestOrigin || allowedOrigins[0]
-      : allowedOrigins[0];
-
-  return {
-    ...securityHeaders,
-    "Access-Control-Allow-Origin": allowedOrigin,
-    "Access-Control-Allow-Headers": "authorization, content-type, x-webhook-token, x-kiwify-token, x-kiwify-signature",
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Vary": "Origin",
-  };
-}
-
-function json(data: unknown, status = 200, corsHeaders: Record<string, string>) {
+function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
     headers: {
@@ -76,8 +67,24 @@ function normalizeEmail(value: unknown) {
   return String(value || "").trim().toLowerCase();
 }
 
+function maskEmail(email: string) {
+  const [name, domain] = email.split("@");
+  if (!name || !domain) return "email_indisponivel";
+  return `${name.slice(0, 2)}***@${domain}`;
+}
+
+const KIWIFY_CHECKOUT_PLAN_MATCHES = [
+  { token: "hhvvb5i", plan: "bronze", planCode: "bronze", credits: 40 },
+  { token: "hhvb5i", plan: "bronze", planCode: "bronze", credits: 40 },
+  { token: "ettcvqn", plan: "prata", planCode: "prata", credits: 120 },
+  { token: "z026oye", plan: "ouro", planCode: "ouro", credits: 250 },
+];
+
 function getPlanFromProduct(productName: string) {
   const normalized = productName.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+
+  const checkoutMatch = KIWIFY_CHECKOUT_PLAN_MATCHES.find((item) => normalized.includes(item.token));
+  if (checkoutMatch) return checkoutMatch;
 
   if (normalized.includes("ouro")) {
     return {
@@ -111,22 +118,14 @@ function getPlanFromProduct(productName: string) {
     };
   }
 
-  if (normalized.includes("pro")) {
-    return {
-      plan: "pro",
-      planCode: "pro",
-      credits: 100,
-    };
-  }
-
   return null;
 }
 
 async function getPlanFromDatabase(
   adminClient: ReturnType<typeof createClient>,
-  productName: string,
+  productMatcher: string,
 ) {
-  const normalizedProductName = productName
+  const normalizedProductMatcher = productMatcher
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase();
@@ -152,7 +151,7 @@ async function getPlanFromDatabase(
           .toLowerCase()
           .trim();
 
-        return normalizedKeyword && normalizedProductName.includes(normalizedKeyword);
+        return normalizedKeyword && normalizedProductMatcher.includes(normalizedKeyword);
       });
     });
 
@@ -175,7 +174,14 @@ function normalizeEvent(value: string) {
 
 function isPaidEvent(value: string) {
   const normalized = normalizeEvent(value);
-  return normalized === "order.paid" || normalized === "compra aprovada" || normalized === "venda aprovada";
+  return [
+    "order.paid",
+    "order_approved",
+    "paid",
+    "approved",
+    "compra aprovada",
+    "venda aprovada",
+  ].includes(normalized);
 }
 
 function isCancellationEvent(value: string) {
@@ -193,12 +199,46 @@ function isCancellationEvent(value: string) {
 }
 
 function getCustomerName(payload: KiwifyEvent) {
-  const directName = payload.customer?.name || payload.customer?.full_name;
+  const directName =
+    payload.customer?.name ||
+    payload.customer?.full_name ||
+    payload.Customer?.name ||
+    payload.Customer?.full_name;
   if (directName) return String(directName).trim();
 
-  const rawCustomer = payload.customer as Record<string, unknown> | undefined;
+  const rawCustomer = (payload.customer || payload.Customer) as Record<string, unknown> | undefined;
   const fallbackName = rawCustomer?.fullName || rawCustomer?.first_name || rawCustomer?.nome;
   return fallbackName ? String(fallbackName).trim() : "";
+}
+
+function getEventType(payload: KiwifyEvent) {
+  return String(payload.event || payload.webhook_event_type || payload.order_status || "");
+}
+
+function getCustomerEmail(payload: KiwifyEvent) {
+  return normalizeEmail(payload.customer?.email || payload.Customer?.email);
+}
+
+function getProductName(payload: KiwifyEvent) {
+  return String(
+    payload.product?.name ||
+      payload.Product?.product_name ||
+      payload.Product?.name ||
+      "",
+  ).trim();
+}
+
+function getProductMatcher(payload: KiwifyEvent, productName: string) {
+  return [
+    productName,
+    payload.product?.id,
+    payload.Product?.product_id,
+    payload.Product?.id,
+    payload.checkout_link,
+  ]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean)
+    .join(" ");
 }
 
 function generateTemporaryPassword() {
@@ -209,12 +249,20 @@ function generateTemporaryPassword() {
     .join("");
 }
 
+function getAppUrl() {
+  return (
+    Deno.env.get("APP_URL") ||
+    Deno.env.get("SITE_URL") ||
+    "https://cardapioproia.vercel.app"
+  ).replace(/\/$/, "");
+}
+
 async function createUserForPurchase(
   adminClient: ReturnType<typeof createClient>,
   email: string,
   fullName: string,
+  req: Request,
 ) {
-  const redirectTo = buildLoginRedirectUrl(Deno.env.get("APP_URL"));
   const { data: createdUser, error: createError } = await adminClient.auth.admin.createUser({
     email,
     password: generateTemporaryPassword(),
@@ -252,6 +300,7 @@ async function createUserForPurchase(
     };
   }
 
+  const redirectTo = `${getAppUrl()}/login`;
   const { error: resetError } = await adminClient.auth.resetPasswordForEmail(email, {
     redirectTo,
   });
@@ -280,33 +329,56 @@ async function getEventId(payload: KiwifyEvent, rawBody: string) {
   if (payload.id) return payload.id;
   if (payload.order?.id) return `${payload.event || "order"}:${payload.order.id}`;
   if (payload.subscription?.id) return `${payload.event || "subscription"}:${payload.subscription.id}`;
+  if (payload.order_id) return `${getEventType(payload) || "order"}:${payload.order_id}`;
+  if (payload.order_ref) return `${getEventType(payload) || "order"}:${payload.order_ref}`;
+  if (payload.subscription_id) return `${getEventType(payload) || "subscription"}:${payload.subscription_id}`;
 
   return `sha256:${await sha256(rawBody)}`;
 }
 
-Deno.serve(async (req) => {
-  const corsHeaders = getCorsHeaders(req);
+function extractWebhookToken(req: Request) {
+  const url = new URL(req.url);
+  const authorization = req.headers.get("authorization") || "";
+  const bearer = authorization.toLowerCase().startsWith("bearer ")
+    ? authorization.slice(7).trim()
+    : "";
 
+  return (
+    req.headers.get("x-webhook-token") ||
+    req.headers.get("x-kiwify-token") ||
+    req.headers.get("x-kiwify-signature") ||
+    bearer ||
+    url.searchParams.get("token")
+  );
+}
+
+function isValidWebhookSecret(req: Request, payload?: KiwifyEvent) {
+  const expected = Deno.env.get("KIWIFY_WEBHOOK_SECRET");
+
+  if (!expected) {
+    console.error("KIWIFY_WEBHOOK_SECRET não configurado; webhook rejeitado por segurança.");
+    return false;
+  }
+
+  const received = extractWebhookToken(req) || String(payload?.token || "");
+  return received === expected;
+}
+
+Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
 
   if (req.method !== "POST") {
-    return json({ error: "Método não suportado" }, 405, corsHeaders);
+    return json({ error: "Método não suportado" }, 405);
   }
 
   const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
   const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-  const KIWIFY_WEBHOOK_SECRET = Deno.env.get("KIWIFY_WEBHOOK_SECRET");
 
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
     console.error("Variáveis do Supabase ausentes na kiwify-webhook.");
-    return json({ error: "Configuração do servidor incompleta" }, 500, corsHeaders);
-  }
-
-  if (!KIWIFY_WEBHOOK_SECRET) {
-    console.error("KIWIFY_WEBHOOK_SECRET ausente na kiwify-webhook.");
-    return json({ error: "Webhook secret não configurado" }, 500, corsHeaders);
+    return json({ error: "Configuração do servidor incompleta" }, 500);
   }
 
   const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
@@ -318,24 +390,25 @@ Deno.serve(async (req) => {
     payload = JSON.parse(rawBody) as KiwifyEvent;
   } catch (error) {
     console.error("Kiwify webhook JSON inválido:", error);
-    return json({ error: "JSON inválido" }, 400, corsHeaders);
+    return json({ error: "JSON inválido" }, 400);
   }
 
-  if (!hasExpectedSecret(KIWIFY_WEBHOOK_SECRET, extractWebhookToken(req))) {
+  if (!isValidWebhookSecret(req, payload)) {
     console.warn("Kiwify webhook rejeitado: token inválido.");
-    return json({ error: "Webhook não autorizado" }, 401, corsHeaders);
+    return json({ error: "Webhook não autorizado" }, 401);
   }
 
-  const eventType = String(payload.event || "");
-  const email = normalizeEmail(payload.customer?.email);
-  const productName = String(payload.product?.name || "").trim();
+  const eventType = getEventType(payload);
+  const email = getCustomerEmail(payload);
+  const productName = getProductName(payload);
+  const productMatcher = getProductMatcher(payload, productName);
   const customerName = getCustomerName(payload);
   const eventId = await getEventId(payload, rawBody);
 
   console.log("Kiwify webhook recebido:", {
     eventId,
     eventType,
-    email,
+    email: email ? maskEmail(email) : null,
     productName,
   });
 
@@ -355,11 +428,11 @@ Deno.serve(async (req) => {
     if (insertEventError) {
       if (insertEventError.code === "23505") {
         console.log("Kiwify webhook duplicado ignorado:", eventId);
-        return json({ success: true, duplicate: true }, 200, corsHeaders);
+        return json({ success: true, duplicate: true });
       }
 
       console.error("Erro ao registrar evento Kiwify:", insertEventError);
-      return json({ error: "Erro ao registrar evento" }, 500, corsHeaders);
+      return json({ error: "Erro ao registrar evento" }, 500);
     }
 
     if (!eventType || !email) {
@@ -370,7 +443,7 @@ Deno.serve(async (req) => {
         .update({ status: "error", error_message: message, processed_at: new Date().toISOString() })
         .eq("event_id", eventId);
 
-      return json({ error: message }, 400, corsHeaders);
+      return json({ error: message }, 400);
     }
 
     const { data: profile, error: profileError } = await adminClient
@@ -386,21 +459,21 @@ Deno.serve(async (req) => {
         .update({ status: "error", error_message: "Erro ao buscar usuário", processed_at: new Date().toISOString() })
         .eq("event_id", eventId);
 
-      return json({ error: "Erro ao buscar usuário" }, 500, corsHeaders);
+      return json({ error: "Erro ao buscar usuário" }, 500);
     }
 
     let userId = profile?.user_id ?? null;
     let createdUserAccessEmailSent = false;
 
     if (!userId && isPaidEvent(eventType)) {
-      const created = await createUserForPurchase(adminClient, email, customerName);
+      const created = await createUserForPurchase(adminClient, email, customerName, req);
       userId = created.userId;
       createdUserAccessEmailSent = created.accessEmailSent;
 
       if (created.error) {
         console.warn("Resultado da criação automática Kiwify:", {
           eventId,
-          email,
+          email: maskEmail(email),
           userId,
           accessEmailSent: created.accessEmailSent,
           error: created.error,
@@ -409,7 +482,7 @@ Deno.serve(async (req) => {
     }
 
     if (!userId) {
-      console.warn("Usuário não encontrado para evento Kiwify:", { eventId, email });
+      console.warn("Usuário não encontrado para evento Kiwify:", { eventId, email: maskEmail(email) });
       await adminClient
         .from("kiwify_webhook_events")
         .update({
@@ -419,11 +492,11 @@ Deno.serve(async (req) => {
         })
         .eq("event_id", eventId);
 
-      return json({ success: true, reconciled: false, reason: "user_not_found" }, 200, corsHeaders);
+      return json({ success: true, reconciled: false, reason: "user_not_found" });
     }
 
     if (isPaidEvent(eventType)) {
-      const mappedPlan = await getPlanFromDatabase(adminClient, productName) || getPlanFromProduct(productName);
+      const mappedPlan = await getPlanFromDatabase(adminClient, productMatcher) || getPlanFromProduct(productMatcher);
 
       if (!mappedPlan) {
         const message = `Produto sem plano mapeado: ${productName}`;
@@ -438,7 +511,7 @@ Deno.serve(async (req) => {
           })
           .eq("event_id", eventId);
 
-        return json({ success: true, ignored: true, reason: "product_not_mapped" }, 200, corsHeaders);
+        return json({ success: true, ignored: true, reason: "product_not_mapped" });
       }
 
       const now = new Date().toISOString();
@@ -452,7 +525,7 @@ Deno.serve(async (req) => {
           status: "active",
           credits_included: mappedPlan.credits,
           provider: "kiwify",
-          provider_reference: String(payload.order?.id || payload.subscription?.id || eventId),
+          provider_reference: String(payload.order?.id || payload.order_id || payload.subscription?.id || payload.subscription_id || eventId),
           updated_at: now,
         }, { onConflict: "user_id" });
 
@@ -472,6 +545,27 @@ Deno.serve(async (req) => {
       if (creditsError) {
         console.error("Erro ao atualizar créditos Kiwify:", creditsError);
         throw creditsError;
+      }
+
+      const { error: creditTransactionError } = await adminClient
+        .from("credit_transactions")
+        .insert({
+          user_id: userId,
+          amount: mappedPlan.credits,
+          balance_after: mappedPlan.credits,
+          reason: "kiwify_order_paid",
+          reference_type: "kiwify_event",
+          reference_id: eventId,
+          metadata: {
+            eventType,
+            productName,
+            provider_reference: String(payload.order?.id || payload.order_id || payload.subscription?.id || payload.subscription_id || eventId),
+            plan: mappedPlan.plan,
+          },
+        });
+
+      if (creditTransactionError) {
+        console.error("Erro ao auditar créditos Kiwify:", creditTransactionError);
       }
 
       const { error: activateProfileError } = await adminClient
@@ -503,7 +597,7 @@ Deno.serve(async (req) => {
         credits: mappedPlan.credits,
         userCreated: !profile?.user_id,
         accessEmailSent: createdUserAccessEmailSent,
-      }, 200, corsHeaders);
+      });
     }
 
     if (isCancellationEvent(eventType)) {
@@ -534,7 +628,7 @@ Deno.serve(async (req) => {
         .eq("event_id", eventId);
 
       console.log("Assinatura Kiwify cancelada:", { eventId, userId, eventType });
-      return json({ success: true, status: "canceled" }, 200, corsHeaders);
+      return json({ success: true, status: "canceled" });
     }
 
     console.log("Evento Kiwify ignorado:", { eventId, eventType });
@@ -548,7 +642,7 @@ Deno.serve(async (req) => {
       })
       .eq("event_id", eventId);
 
-    return json({ success: true, ignored: true }, 200, corsHeaders);
+    return json({ success: true, ignored: true });
   } catch (error) {
     console.error("Erro geral no webhook Kiwify:", error);
     await adminClient
@@ -560,6 +654,6 @@ Deno.serve(async (req) => {
       })
       .eq("event_id", eventId);
 
-    return json({ error: "Erro ao processar webhook" }, 500, corsHeaders);
+    return json({ error: "Erro ao processar webhook" }, 500);
   }
 });

@@ -1,10 +1,8 @@
 import { defineConfig } from "@playwright/test";
 
 export default defineConfig({
-  // Add your custom playwright configuration here
-  // Example:
   // timeout: 60000,
   // use: {
-  //   baseURL: 'http://localhost:3000',
+  //   baseURL: "http://localhost:3008",
   // },
 });

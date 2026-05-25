@@ -1,5 +1,4 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { buildLoginRedirectUrl } from "../_shared/security.ts";
 
 const securityHeaders = {
   "X-Content-Type-Options": "nosniff",
@@ -14,23 +13,28 @@ const DEFAULT_ALLOWED_ORIGINS = [
   "https://www.cardapioproia.com.br",
 ];
 
-type ManageUsersAction = "create-user" | "update-user" | "delete-user" | "send-reset";
+type ManageUsersAction =
+  | "create-user"
+  | "update-user"
+  | "set-role"
+  | "delete-user"
+  | "send-reset"
+  | "add-credits";
 
 function getCorsHeaders(req: Request) {
   const requestOrigin = req.headers.get("origin");
-  const configuredOrigins = [
-    Deno.env.get("APP_URL"),
-    ...(Deno.env.get("ALLOWED_ORIGIN") || "").split(","),
-  ]
-    .map((origin) => origin?.trim())
-    .filter(Boolean) as string[];
+  const configuredOrigins = (Deno.env.get("ALLOWED_ORIGIN") || "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
   const allowedOrigins = Array.from(new Set([...configuredOrigins, ...DEFAULT_ALLOWED_ORIGINS]));
   const isLocalOrigin =
     requestOrigin?.startsWith("http://localhost:") ||
     requestOrigin?.startsWith("http://127.0.0.1:");
+  const allowAny = allowedOrigins.includes("*");
   const allowedOrigin =
-    isLocalOrigin || (requestOrigin && allowedOrigins.includes(requestOrigin))
-      ? requestOrigin || allowedOrigins[0]
+    allowAny || isLocalOrigin || (requestOrigin && allowedOrigins.includes(requestOrigin))
+      ? requestOrigin || "*"
       : allowedOrigins[0];
 
   return {
@@ -42,7 +46,15 @@ function getCorsHeaders(req: Request) {
   };
 }
 
-function json(data: unknown, status = 200, corsHeaders: Record<string, string>) {
+function getAppUrl() {
+  return (
+    Deno.env.get("APP_URL") ||
+    Deno.env.get("SITE_URL") ||
+    "https://cardapioproia.vercel.app"
+  ).replace(/\/$/, "");
+}
+
+function json(data: unknown, status: number, corsHeaders: Record<string, string>) {
   return new Response(JSON.stringify(data), {
     status,
     headers: {
@@ -50,6 +62,27 @@ function json(data: unknown, status = 200, corsHeaders: Record<string, string>) 
       "Content-Type": "application/json",
     },
   });
+}
+
+async function logAdminAction(
+  adminClient: ReturnType<typeof createClient>,
+  input: {
+    actorUserId: string;
+    targetUserId?: string | null;
+    action: string;
+    metadata?: Record<string, unknown>;
+  },
+) {
+  const { error } = await adminClient.from("admin_audit_logs").insert({
+    actor_user_id: input.actorUserId,
+    target_user_id: input.targetUserId || null,
+    action: input.action,
+    metadata: input.metadata || {},
+  });
+
+  if (error) {
+    console.error("Admin audit log error:", error);
+  }
 }
 
 Deno.serve(async (req) => {
@@ -125,7 +158,6 @@ Deno.serve(async (req) => {
 
       if (authUsersError) {
         console.error("Auth users list error:", authUsersError);
-        return json({ error: "Erro ao listar usuários" }, 500, corsHeaders);
       }
 
       const authUsersById = new Map(
@@ -146,13 +178,26 @@ Deno.serve(async (req) => {
 
       if (generatedPhotosError) {
         console.error("Generated photos count error:", generatedPhotosError);
-        return json({ error: "Erro ao contar fotos geradas" }, 500, corsHeaders);
       }
 
       const photosByUserId = new Map<string, number>();
       for (const photo of generatedPhotos || []) {
         if (!photo.user_id) continue;
         photosByUserId.set(photo.user_id, (photosByUserId.get(photo.user_id) || 0) + 1);
+      }
+
+      const { data: creditsRows, error: creditsError } = await adminClient
+        .from("user_credits")
+        .select("user_id, credits");
+
+      if (creditsError) {
+        console.error("Credits list error:", creditsError);
+      }
+
+      const creditsByUserId = new Map<string, number>();
+      for (const row of creditsRows || []) {
+        if (!row.user_id) continue;
+        creditsByUserId.set(row.user_id, Number(row.credits) || 0);
       }
 
       const users = (profiles || []).map((profile) => {
@@ -167,6 +212,7 @@ Deno.serve(async (req) => {
           created_at: profile.created_at || authUser?.created_at,
           last_sign_in_at: authUser?.last_sign_in_at ?? null,
           photos_generated: photosByUserId.get(profile.user_id) || 0,
+          credits: creditsByUserId.get(profile.user_id) || 0,
         };
       });
 
@@ -220,6 +266,13 @@ Deno.serve(async (req) => {
         console.error("Create profile error:", profileError);
         return json({ error: "Usuário criado, mas o perfil não foi salvo corretamente" }, 500, corsHeaders);
       }
+
+      await logAdminAction(adminClient, {
+        actorUserId: requester.id,
+        targetUserId: createdUser.user.id,
+        action: "create_user",
+        metadata: { email, fullName: fullName || null },
+      });
 
       return json({
         user: {
@@ -276,6 +329,13 @@ Deno.serve(async (req) => {
         }
       }
 
+      await logAdminAction(adminClient, {
+        actorUserId: requester.id,
+        targetUserId,
+        action: "update_user",
+        metadata: updates,
+      });
+
       return json({ user: updatedProfile }, 200, corsHeaders);
     }
 
@@ -285,13 +345,7 @@ Deno.serve(async (req) => {
         return json({ error: "E-mail obrigatório" }, 400, corsHeaders);
       }
 
-      let redirectTo: string;
-      try {
-        redirectTo = buildLoginRedirectUrl(Deno.env.get("APP_URL"));
-      } catch (error) {
-        console.error("Reset password APP_URL error:", error);
-        return json({ error: error instanceof Error ? error.message : "APP_URL inválido" }, 500, corsHeaders);
-      }
+      const redirectTo = `${getAppUrl()}/login`;
 
       const { error: resetError } = await adminClient.auth.resetPasswordForEmail(email, {
         redirectTo,
@@ -302,7 +356,116 @@ Deno.serve(async (req) => {
         return json({ error: resetError.message || "Erro ao enviar e-mail de redefinição" }, 500, corsHeaders);
       }
 
+      await logAdminAction(adminClient, {
+        actorUserId: requester.id,
+        action: "send_password_reset",
+        metadata: { email, redirectTo },
+      });
+
       return json({ success: true }, 200, corsHeaders);
+    }
+
+    if (action === "set-role") {
+      const targetUserId = String(body?.userId || "");
+      const role = String(body?.role || "").trim();
+
+      if (!targetUserId || !["admin", "user"].includes(role)) {
+        return json({ error: "Perfil inválido" }, 400, corsHeaders);
+      }
+
+      const { data: updatedProfile, error: roleError } = await adminClient
+        .from("user_profiles")
+        .update({
+          role,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("user_id", targetUserId)
+        .select("*")
+        .single();
+
+      if (roleError) {
+        console.error("Set role error:", roleError);
+        return json({ error: "Erro ao atualizar perfil do usuário" }, 500, corsHeaders);
+      }
+
+      await logAdminAction(adminClient, {
+        actorUserId: requester.id,
+        targetUserId,
+        action: "set_role",
+        metadata: { role },
+      });
+
+      return json({ user: updatedProfile }, 200, corsHeaders);
+    }
+
+    if (action === "add-credits") {
+      const targetUserId = String(body?.userId || "");
+      const amount = Number(body?.amount);
+
+      if (!targetUserId) {
+        return json({ error: "Usuário inválido" }, 400, corsHeaders);
+      }
+
+      if (!Number.isInteger(amount) || amount <= 0 || amount > 999_999) {
+        return json({ error: "Informe uma quantidade de créditos válida" }, 400, corsHeaders);
+      }
+
+      const { data: currentCredits, error: currentCreditsError } = await adminClient
+        .from("user_credits")
+        .select("credits")
+        .eq("user_id", targetUserId)
+        .maybeSingle();
+
+      if (currentCreditsError && currentCreditsError.code !== "PGRST116") {
+        console.error("Current credits error:", currentCreditsError);
+        return json({ error: "Erro ao consultar créditos atuais" }, 500, corsHeaders);
+      }
+
+      const nextCredits = Math.min((Number(currentCredits?.credits) || 0) + amount, 999_999);
+
+      const { data: updatedCredits, error: updateCreditsError } = await adminClient
+        .from("user_credits")
+        .upsert({
+          user_id: targetUserId,
+          credits: nextCredits,
+          updated_at: new Date().toISOString(),
+        }, { onConflict: "user_id" })
+        .select("credits")
+        .single();
+
+      if (updateCreditsError) {
+        console.error("Add credits error:", updateCreditsError);
+        return json({ error: "Erro ao adicionar créditos" }, 500, corsHeaders);
+      }
+
+      const { error: creditTransactionError } = await adminClient.from("credit_transactions").insert({
+        user_id: targetUserId,
+        amount,
+        balance_after: updatedCredits.credits,
+        reason: "admin_manual_add",
+        reference_type: "admin_action",
+        reference_id: requester.id,
+        created_by: requester.id,
+        metadata: {
+          previous_balance: Number(currentCredits?.credits) || 0,
+        },
+      });
+
+      if (creditTransactionError) {
+        console.error("Credit transaction audit error:", creditTransactionError);
+      }
+
+      await logAdminAction(adminClient, {
+        actorUserId: requester.id,
+        targetUserId,
+        action: "add_credits",
+        metadata: {
+          amount,
+          balance_after: updatedCredits.credits,
+        },
+      });
+
+      return json({ credits: updatedCredits.credits }, 200, corsHeaders);
     }
 
     if (action === "delete-user") {
@@ -322,6 +485,12 @@ Deno.serve(async (req) => {
         console.error("Delete user error:", deleteError);
         return json({ error: deleteError.message || "Erro ao remover usuário" }, 500, corsHeaders);
       }
+
+      await logAdminAction(adminClient, {
+        actorUserId: requester.id,
+        targetUserId,
+        action: "delete_user",
+      });
 
       return json({ success: true }, 200, corsHeaders);
     }

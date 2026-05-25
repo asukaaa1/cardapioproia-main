@@ -7,6 +7,7 @@ import { supabase } from "@/integrations/supabase/client";
 import type { Tables } from "@/integrations/supabase/types";
 import LoginPage from "./LoginPage";
 import { isMissingRelationError } from "@/lib/usageMetrics";
+import { resolveImageUrl } from "@/lib/imageStorage";
 
 type PhotoRecord = Tables<"photo_history">;
 
@@ -28,7 +29,7 @@ const Index = () => {
 
       const recentQuery = supabase
         .from("photo_history")
-        .select("*")
+        .select("id, result_image_url, created_at")
         .eq("user_id", user!.id)
         .order("created_at", { ascending: false })
         .limit(4);
@@ -80,6 +81,13 @@ const Index = () => {
       const cycleUsage = totalPhotos ?? 0;
       const creditsRemaining = credits?.credits ?? 0;
 
+      const recentPhotos = await Promise.all(
+        ((photos ?? []) as PhotoRecord[]).map(async (photo) => ({
+          ...photo,
+          result_image_url: await resolveImageUrl(photo.result_image_url),
+        })),
+      );
+
       return {
         creditsIncluded,
         creditsRemaining,
@@ -87,10 +95,11 @@ const Index = () => {
         planCode: subscription?.plan ?? subscription?.plan_code ?? "free",
         totalPhotos: totalPhotos ?? 0,
         totalDownloads: totalDownloads ?? 0,
-        recentPhotos: (photos ?? []) as PhotoRecord[],
+        recentPhotos,
       };
     },
-    staleTime: 30_000,
+    placeholderData: (previousData) => previousData,
+    staleTime: 90_000,
   });
 
   if (!user) {
