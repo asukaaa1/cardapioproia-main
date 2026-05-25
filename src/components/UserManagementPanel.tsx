@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Loader2, Mail, Plus, RefreshCw, Trash2, UserCog } from "lucide-react";
+import { Coins, Loader2, Mail, Plus, RefreshCw, Trash2, UserCog } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "@/contexts/AuthContext";
 import { getEdgeFunctionUrl } from "@/lib/edgeFunctions";
@@ -30,6 +30,7 @@ type ManagedUser = {
   created_at: string | null;
   last_sign_in_at: string | null;
   photos_generated: number;
+  credits: number;
 };
 
 type CreateUserForm = {
@@ -55,6 +56,8 @@ export function UserManagementPanel() {
   const [submitting, setSubmitting] = useState(false);
   const [pendingKey, setPendingKey] = useState<string | null>(null);
   const [functionUnavailable, setFunctionUnavailable] = useState(false);
+  const [creditDialogUser, setCreditDialogUser] = useState<ManagedUser | null>(null);
+  const [creditAmount, setCreditAmount] = useState("10");
   const [form, setForm] = useState<CreateUserForm>({
     fullName: "",
     email: "",
@@ -123,6 +126,20 @@ export function UserManagementPanel() {
         photosByUserId.set(photo.user_id, (photosByUserId.get(photo.user_id) || 0) + 1);
       }
 
+      const { data: creditRows, error: creditsError } = await supabase
+        .from("user_credits")
+        .select("user_id, credits");
+
+      if (creditsError) {
+        console.warn("Direct credits list unavailable:", creditsError);
+      }
+
+      const creditsByUserId = new Map<string, number>();
+      for (const row of creditRows || []) {
+        if (!row.user_id) continue;
+        creditsByUserId.set(row.user_id, Number(row.credits) || 0);
+      }
+
       setRestricted(false);
       setFunctionUnavailable(true);
       setUsers(
@@ -136,6 +153,7 @@ export function UserManagementPanel() {
           created_at: item.created_at,
           last_sign_in_at: null,
           photos_generated: photosByUserId.get(item.user_id) || 0,
+          credits: creditsByUserId.get(item.user_id) || 0,
         })),
       );
     } catch (error) {
@@ -261,6 +279,47 @@ export function UserManagementPanel() {
     } catch (error) {
       console.error("Reset user password error:", error);
       toast.error(error instanceof Error ? error.message : "Erro ao reenviar redefinição");
+    } finally {
+      setPendingKey(null);
+    }
+  };
+
+  const handleAddCredits = async (event: React.FormEvent) => {
+    event.preventDefault();
+
+    if (!creditDialogUser) return;
+
+    if (functionUnavailable) {
+      toast.error("Adicionar créditos depende da função manage-users publicada no Supabase.");
+      return;
+    }
+
+    const amount = Number(creditAmount);
+    if (!Number.isInteger(amount) || amount <= 0) {
+      toast.error("Informe uma quantidade válida de créditos.");
+      return;
+    }
+
+    try {
+      setPendingKey(creditDialogUser.id);
+      const payload = await postAction({
+        action: "add-credits",
+        userId: creditDialogUser.id,
+        amount,
+      });
+
+      const nextCredits = Number(payload?.credits) || 0;
+      setUsers((current) =>
+        current.map((item) =>
+          item.id === creditDialogUser.id ? { ...item, credits: nextCredits } : item,
+        ),
+      );
+      toast.success(`${amount} crédito${amount !== 1 ? "s" : ""} adicionado${amount !== 1 ? "s" : ""}.`);
+      setCreditDialogUser(null);
+      setCreditAmount("10");
+    } catch (error) {
+      console.error("Add credits error:", error);
+      toast.error(error instanceof Error ? error.message : "Erro ao adicionar créditos");
     } finally {
       setPendingKey(null);
     }
@@ -397,9 +456,44 @@ export function UserManagementPanel() {
         </div>
       </div>
 
+      <Dialog open={!!creditDialogUser} onOpenChange={(open) => !open && setCreditDialogUser(null)}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Adicionar créditos</DialogTitle>
+            <DialogDescription>
+              {creditDialogUser
+                ? `Créditos atuais de ${creditDialogUser.email}: ${creditDialogUser.credits}`
+                : "Informe a quantidade de créditos para adicionar."}
+            </DialogDescription>
+          </DialogHeader>
+
+          <form className="space-y-4" onSubmit={handleAddCredits}>
+            <div className="space-y-1.5">
+              <Label htmlFor="credit-amount">Quantidade</Label>
+              <Input
+                id="credit-amount"
+                type="number"
+                min={1}
+                max={999999}
+                step={1}
+                value={creditAmount}
+                onChange={(event) => setCreditAmount(event.target.value)}
+                autoFocus
+                required
+              />
+            </div>
+
+            <Button type="submit" className="w-full" disabled={Boolean(pendingKey)}>
+              {pendingKey ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Coins className="mr-2 h-4 w-4" />}
+              Adicionar créditos
+            </Button>
+          </form>
+        </DialogContent>
+      </Dialog>
+
       {functionUnavailable ? (
         <div className="rounded-2xl border border-amber-500/25 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
-          A listagem está funcionando em modo básico pelo banco. Para criar usuário, remover conta e reenviar redefinição de senha, publique a edge function `manage-users`.
+          A listagem está funcionando em modo básico pelo banco. Para criar usuário, remover conta, reenviar redefinição de senha e adicionar créditos, publique a edge function `manage-users`.
         </div>
       ) : null}
 
@@ -410,6 +504,7 @@ export function UserManagementPanel() {
               <TableHead>Usuário</TableHead>
               <TableHead>Status</TableHead>
               <TableHead>Afiliado</TableHead>
+              <TableHead>Créditos</TableHead>
               <TableHead>Fotos</TableHead>
               <TableHead>Criado em</TableHead>
               <TableHead>Último acesso</TableHead>
@@ -458,11 +553,25 @@ export function UserManagementPanel() {
                     </div>
                   </TableCell>
 
+                  <TableCell className="text-sm font-semibold text-foreground">{managedUser.credits}</TableCell>
                   <TableCell className="text-sm font-semibold text-foreground">{managedUser.photos_generated}</TableCell>
                   <TableCell className="text-sm text-muted-foreground">{formatDate(managedUser.created_at)}</TableCell>
                   <TableCell className="text-sm text-muted-foreground">{formatDate(managedUser.last_sign_in_at)}</TableCell>
                   <TableCell>
                     <div className="flex justify-end gap-2">
+                      <Button
+                        variant="outline"
+                        size="icon"
+                        disabled={isBusy || functionUnavailable}
+                        onClick={() => {
+                          setCreditDialogUser(managedUser);
+                          setCreditAmount("10");
+                        }}
+                        aria-label={`Adicionar créditos para ${managedUser.email}`}
+                        title="Adicionar créditos"
+                      >
+                        <Coins className="h-4 w-4" />
+                      </Button>
                       <Button
                         variant="outline"
                         size="icon"

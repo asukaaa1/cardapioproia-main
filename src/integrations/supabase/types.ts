@@ -116,6 +116,7 @@ export type Database = {
           name: string
           period_label: string
           price_label: string
+          show_on_landing: boolean
           sort_order: number
           updated_at: string
         }
@@ -133,6 +134,7 @@ export type Database = {
           name: string
           period_label?: string
           price_label?: string
+          show_on_landing?: boolean
           sort_order?: number
           updated_at?: string
         }
@@ -150,6 +152,7 @@ export type Database = {
           name?: string
           period_label?: string
           price_label?: string
+          show_on_landing?: boolean
           sort_order?: number
           updated_at?: string
         }

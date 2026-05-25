@@ -21,7 +21,7 @@ Ela cria:
 Deploy das funções:
 
 ```bash
-supabase functions deploy kiwify-webhook
+supabase functions deploy kiwify-webhook --no-verify-jwt
 supabase functions deploy process-food-image
 ```
 
@@ -33,8 +33,9 @@ Configure no Supabase:
 supabase secrets set SUPABASE_SERVICE_ROLE_KEY="sua-service-role-key"
 supabase secrets set GEMINI_API_KEY="sua-chave-gemini"
 supabase secrets set KIWIFY_WEBHOOK_SECRET="um-token-forte-criado-por-voce"
-supabase secrets set ALLOWED_ORIGIN="https://cardapioproia.vercel.app"
-supabase secrets set APP_URL="https://cardapioproia.vercel.app"
+supabase secrets set ALLOWED_ORIGIN="https://cardapioproia.com.br,https://www.cardapioproia.com.br,https://cardapioproia.vercel.app"
+supabase secrets set APP_URL="https://cardapioproia.com.br"
+supabase secrets set SITE_URL="https://cardapioproia.com.br"
 ```
 
 O `KIWIFY_WEBHOOK_SECRET` deve ser enviado pela Kiwify em um destes formatos:
@@ -43,6 +44,7 @@ O `KIWIFY_WEBHOOK_SECRET` deve ser enviado pela Kiwify em um destes formatos:
 - Header `x-kiwify-token`
 - Header `x-kiwify-signature`
 - Header `Authorization: Bearer SEU_TOKEN`
+- Campo `token` no JSON, se a Kiwify enviar o token dentro do payload
 
 ## URL do webhook na Kiwify
 
@@ -55,13 +57,20 @@ https://SEU_PROJECT_REF.supabase.co/functions/v1/kiwify-webhook
 Eventos tratados:
 
 - `order.paid`
+- `order_approved`
+- `paid`
 - `subscription.canceled`
 - `order.refunded`
+- `chargeback`
+- `refund`
 
 ## Mapeamento de planos
 
-- Produto contendo `Pro`: plano `pro`, `100` créditos.
-- Produto contendo `Ilimitado`: plano `ilimitado`, `999999` créditos.
+- Produto/link contendo `bronze` ou o código do checkout Bronze: plano `bronze`, `40` créditos.
+- Produto/link contendo `prata` ou o código do checkout Prata: plano `prata`, `120` créditos.
+- Produto/link contendo `ouro` ou o código do checkout Ouro: plano `ouro`, `250` créditos.
+- Produto contendo `Pro`: plano legado `pro`, `100` créditos.
+- Produto contendo `Ilimitado`: plano legado `ilimitado`, `999999` créditos.
 
 ## Regras de crédito
 

@@ -14,6 +14,7 @@ vi.mock("@/contexts/AuthContext", () => ({
   useAuth: () => ({
     user: { id: "22222222-2222-2222-2222-222222222222" },
     session: { access_token: "test-token" },
+    profile: { role: "user" },
   }),
 }));
 
@@ -27,6 +28,11 @@ vi.mock("@/integrations/supabase/client", () => ({
       refreshSession: vi.fn().mockResolvedValue({
         data: { session: { access_token: "test-token", expires_at: Math.floor(Date.now() / 1000) + 3600 } },
         error: null,
+      }),
+    },
+    storage: {
+      from: vi.fn().mockReturnValue({
+        upload: vi.fn().mockResolvedValue({ error: null }),
       }),
     },
     from: (table: string) => {
@@ -67,7 +73,7 @@ vi.mock("@/components/ImageUploadZone", () => ({
     label: string;
     onImageChange: (image: string) => void;
   }) => (
-    <button type="button" onClick={() => onImageChange("data:image/png;base64,abc")}>
+    <button type="button" onClick={() => onImageChange("data:image/png;base64,YWJj")}>
       {label}
     </button>
   ),
@@ -118,9 +124,122 @@ describe("MelhorarFotos", () => {
       "fetch",
       vi.fn().mockResolvedValue({
         ok: true,
-        json: async () => ({ image: "data:image/png;base64,processed" }),
+        json: async () => ({ image: "data:image/png;base64,YWJjZA==" }),
       }),
     );
+  });
+
+  it("imports an iFood item and sends it to the menu item generation mode", async () => {
+    insertMock.mockReturnValue({
+      select: () => ({
+        single: async () => ({
+          data: { id: "photo-1" },
+          error: null,
+        }),
+      }),
+    });
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          restaurant: {
+            name: "Burger Test",
+            url: "https://www.ifood.com.br/delivery/test-store",
+            merchantId: "merchant-1",
+            mainImageUrl: null,
+          },
+          items: [
+            {
+              id: "item-1",
+              sectionName: "Lanches",
+              name: "X Bacon",
+              description: "Pao, burger e bacon",
+              imageUrl: "https://static-images.ifood.com.br/item.jpg",
+              price: 29.9,
+              availability: "AVAILABLE",
+            },
+          ],
+          counts: {
+            totalItems: 1,
+            itemsWithImages: 1,
+            skippedWithoutImage: 0,
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ image: "data:image/png;base64,YWJjZA==" }),
+      });
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderPage();
+
+    fireEvent.click(screen.getByRole("button", { name: /Item do iFood/i }));
+    fireEvent.change(screen.getByPlaceholderText("https://www.ifood.com.br/delivery/..."), {
+      target: { value: "https://www.ifood.com.br/delivery/test-store" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Buscar itens/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText("X Bacon")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Referência de estilo" }));
+    fireEvent.click(screen.getByRole("button", { name: /Gerar foto do item/i }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    const generationPayload = JSON.parse(fetchMock.mock.calls[1][1].body);
+    expect(generationPayload).toMatchObject({
+      mode: "menu_item",
+      itemName: "X Bacon",
+      itemDescription: "Pao, burger e bacon",
+      sourceImageUrl: "https://static-images.ifood.com.br/item.jpg",
+      referenceImage: "data:image/png;base64,YWJj",
+      restaurantUrl: "https://www.ifood.com.br/delivery/test-store",
+    });
+  });
+
+  it("warns when the imported iFood menu has no items with images", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          restaurant: {
+            name: "No Photo Store",
+            url: "https://www.ifood.com.br/delivery/no-photo-store",
+            merchantId: "merchant-2",
+            mainImageUrl: null,
+          },
+          items: [],
+          counts: {
+            totalItems: 4,
+            itemsWithImages: 0,
+            skippedWithoutImage: 4,
+          },
+        }),
+      }),
+    );
+
+    renderPage();
+
+    fireEvent.click(screen.getByRole("button", { name: /Item do iFood/i }));
+    fireEvent.change(screen.getByPlaceholderText("https://www.ifood.com.br/delivery/..."), {
+      target: { value: "https://www.ifood.com.br/delivery/no-photo-store" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Buscar itens/i }));
+
+    await waitFor(() => {
+      expect(toast.warning).toHaveBeenCalledWith("Nenhum item com imagem foi encontrado nesse cardápio.", {
+        id: "import-ifood-menu",
+      });
+    });
   });
 
   it("warns the user when the image is generated but history persistence fails", async () => {
@@ -155,7 +274,7 @@ describe("MelhorarFotos", () => {
       );
     });
 
-    expect(toast.success).not.toHaveBeenCalled();
+    expect(toast.success).toHaveBeenCalledWith("Imagem processada com sucesso!", { id: "processing" });
     expect(screen.getByText("Resultado")).toBeInTheDocument();
   });
 });

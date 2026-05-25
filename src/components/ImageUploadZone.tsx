@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from "react";
 import { Upload, X, Image as ImageIcon, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
+import { optimizeImageDataUrl } from "@/lib/imageOptimization";
 
 interface ImageUploadZoneProps {
   label: string;
@@ -28,7 +29,7 @@ const ImageUploadZone = ({ label, sublabel, image, onImageChange }: ImageUploadZ
   const [isDragOver, setIsDragOver] = useState(false);
   const [warning, setWarning] = useState<ImageWarning | null>(null);
 
-  const handleFile = useCallback((file: File) => {
+  const handleFile = useCallback(async (file: File) => {
     if (!ACCEPTED_TYPES.includes(file.type)) {
       toast.error("Formato inválido. Use JPG, PNG ou WebP.");
       return;
@@ -38,17 +39,18 @@ const ImageUploadZone = ({ label, sublabel, image, onImageChange }: ImageUploadZ
       return;
     }
 
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const dataUrl = e.target?.result as string;
+    try {
+      const dataUrl = await optimizeImageDataUrl(file);
       const img = new Image();
       img.onload = () => {
         setWarning(checkImageQuality(img));
       };
       img.src = dataUrl;
       onImageChange(dataUrl);
-    };
-    reader.readAsDataURL(file);
+    } catch (error) {
+      console.error("Image optimization error:", error);
+      toast.error("Não foi possível preparar essa imagem.");
+    }
   }, [onImageChange]);
 
   const handleDrop = useCallback((e: React.DragEvent) => {

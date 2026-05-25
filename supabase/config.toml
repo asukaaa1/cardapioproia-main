@@ -1,6 +1,38 @@
 project_id = "dcbfzwzrqffyjmptmjgh"
 
+[auth]
+enabled = true
+site_url = "https://cardapioproia.com.br"
+additional_redirect_urls = [
+  "https://cardapioproia.com.br/**",
+  "https://www.cardapioproia.com.br/**",
+  "https://cardapioproia.vercel.app/**",
+  "https://www.cardapioproia.com.br",
+  "https://cardapioproia.vercel.app",
+  "http://localhost:3008",
+  "http://localhost:5173",
+]
+jwt_expiry = 3600
+enable_refresh_token_rotation = true
+
+[auth.email]
+# 24 horas para links de redefinição/convite enviados pelo Supabase Auth.
+enable_signup = true
+double_confirm_changes = true
+enable_confirmations = false
+secure_password_change = false
+max_frequency = "1m0s"
+otp_length = 8
+otp_expiry = 86400
+
+[auth.mfa.totp]
+enroll_enabled = true
+verify_enabled = true
+
 [functions.process-food-image]
+verify_jwt = false
+
+[functions.import-ifood-menu]
 verify_jwt = false
 
 [functions.delete-photo]
@@ -10,4 +42,10 @@ verify_jwt = false
 verify_jwt = false
 
 [functions.kiwify-webhook]
+verify_jwt = false
+
+[functions.cleanup-expired-photos]
+verify_jwt = false
+
+[functions.claim-free-credits]
 verify_jwt = false

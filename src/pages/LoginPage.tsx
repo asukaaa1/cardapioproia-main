@@ -1,23 +1,37 @@
 import { useEffect, useState } from "react";
 import { Navigate, useLocation } from "react-router-dom";
-import { Loader2, Sparkles } from "lucide-react";
+import { Eye, EyeOff, Loader2 } from "lucide-react";
 import { toast } from "sonner";
+import { BrandLogo } from "@/components/BrandLogo";
 import { useAuth } from "@/contexts/AuthContext";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { supabase } from "@/integrations/supabase/client";
 
 interface LoginPageProps {
   embedded?: boolean;
 }
 
-type AuthMode = "login" | "register";
+type AuthMode = "login" | "register" | "forgot" | "recovery";
+
+function getPasswordUpdateErrorMessage(message?: string) {
+  const normalizedMessage = (message || "").toLowerCase();
+
+  if (normalizedMessage.includes("different from the old password")) {
+    return "A nova senha precisa ser diferente da senha atual ou temporária.";
+  }
+
+  return message || "Não foi possível salvar a nova senha.";
+}
 
 export default function LoginPage({ embedded = false }: LoginPageProps) {
   const { user, loading: authLoading, signIn, signUp } = useAuth();
   const location = useLocation();
   const [mode, setMode] = useState<AuthMode>("login");
   const [loading, setLoading] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [form, setForm] = useState({
     fullName: "",
     email: "",
@@ -25,12 +39,32 @@ export default function LoginPage({ embedded = false }: LoginPageProps) {
     confirmPassword: "",
   });
   const redirectTo = location.state?.from?.pathname ?? "/melhorar";
+  const recoveryRedirectUrl = `${window.location.origin}/login`;
 
   useEffect(() => {
     const blockedMessage = sessionStorage.getItem("blocked_access_message");
     if (blockedMessage) {
       toast.error(blockedMessage);
       sessionStorage.removeItem("blocked_access_message");
+    }
+
+    const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+    const queryParams = new URLSearchParams(window.location.search);
+    const authError = hashParams.get("error_description") || queryParams.get("error_description");
+    const authType = hashParams.get("type") || queryParams.get("type");
+
+    if (authError) {
+      toast.error(
+        authError.includes("expired")
+          ? "Esse link expirou ou já foi usado. Peça um novo e-mail de redefinição."
+          : authError,
+      );
+      window.history.replaceState({}, document.title, window.location.pathname);
+      return;
+    }
+
+    if (authType === "recovery" || hashParams.has("access_token")) {
+      setMode("recovery");
     }
   }, []);
 
@@ -42,7 +76,7 @@ export default function LoginPage({ embedded = false }: LoginPageProps) {
     );
   }
 
-  if (user) return <Navigate to={redirectTo} replace />;
+  if (user && mode !== "recovery") return <Navigate to={redirectTo} replace />;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -56,6 +90,56 @@ export default function LoginPage({ embedded = false }: LoginPageProps) {
         } else {
           toast.success("Login realizado com sucesso.");
         }
+        return;
+      }
+
+      if (mode === "forgot") {
+        const email = form.email.trim().toLowerCase();
+        if (!email) {
+          toast.error("Informe seu e-mail para receber o link de redefinição.");
+          return;
+        }
+
+        const { error } = await supabase.auth.resetPasswordForEmail(email, {
+          redirectTo: recoveryRedirectUrl,
+        });
+
+        if (error) {
+          toast.error(error.message || "Não foi possível enviar o e-mail de redefinição.");
+          return;
+        }
+
+        toast.success("Enviamos um link para redefinir sua senha.");
+        setMode("login");
+        setForm((current) => ({ ...current, password: "", confirmPassword: "" }));
+        return;
+      }
+
+      if (mode === "recovery") {
+        if (form.password.length < 6) {
+          toast.error("A senha precisa ter pelo menos 6 caracteres.");
+          return;
+        }
+
+        if (form.password !== form.confirmPassword) {
+          toast.error("As senhas não conferem.");
+          return;
+        }
+
+        const { error } = await supabase.auth.updateUser({ password: form.password });
+
+        if (error) {
+          toast.error(getPasswordUpdateErrorMessage(error.message));
+          return;
+        }
+
+        toast.success("Senha criada com sucesso. Entre novamente com sua nova senha.");
+        await supabase.auth.signOut();
+        setMode("login");
+        setForm((current) => ({ ...current, password: "", confirmPassword: "" }));
+        setShowPassword(false);
+        setShowConfirmPassword(false);
+        window.history.replaceState({}, document.title, "/login");
         return;
       }
 
@@ -94,19 +178,20 @@ export default function LoginPage({ embedded = false }: LoginPageProps) {
   return (
     <div className={`${embedded ? "flex items-center justify-center" : "min-h-screen flex items-center justify-center"} bg-background p-4`}>
       <div className={`w-full ${embedded ? "max-w-md" : "max-w-sm"} space-y-8`}>
-        <div className="text-center space-y-2">
-          <div className="mb-2 inline-flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/10">
-            <Sparkles className="h-7 w-7 text-primary" />
-          </div>
-          <h1 className="text-2xl font-display font-bold text-foreground">
-            Cardápio <span className="text-primary">Pro IA</span>
-          </h1>
+        <div className="space-y-3 text-center">
+          <BrandLogo className="justify-center" imageClassName="h-16 w-auto max-w-[260px] object-contain" />
           <p className="text-sm text-muted-foreground">
-            {mode === "login" ? "Entre na sua conta para acessar o estúdio" : "Crie sua conta para usar o sistema"}
+            {mode === "login"
+              ? "Entre na sua conta para acessar o estúdio"
+              : mode === "forgot"
+                ? "Informe seu e-mail para receber um link seguro"
+              : mode === "recovery"
+                ? "Crie uma nova senha para acessar sua conta"
+                : "Crie sua conta para usar o sistema"}
           </p>
         </div>
 
-        <div className="grid grid-cols-2 rounded-2xl border border-border bg-card/50 p-1">
+        {(mode === "login" || mode === "register") && <div className="grid grid-cols-2 rounded-2xl border border-border bg-card/50 p-1">
           <button
             type="button"
             onClick={() => setMode("login")}
@@ -125,7 +210,7 @@ export default function LoginPage({ embedded = false }: LoginPageProps) {
           >
             Criar conta
           </button>
-        </div>
+        </div>}
 
         <form onSubmit={handleSubmit} className={`${embedded ? "dashboard-panel" : "glass-card"} space-y-4 p-6`}>
           {mode === "register" && (
@@ -143,7 +228,7 @@ export default function LoginPage({ embedded = false }: LoginPageProps) {
             </div>
           )}
 
-          <div className="space-y-1.5">
+          {mode !== "recovery" && <div className="space-y-1.5">
             <Label htmlFor="email">E-mail</Label>
             <Input
               id="email"
@@ -154,42 +239,99 @@ export default function LoginPage({ embedded = false }: LoginPageProps) {
               autoComplete="username"
               required
             />
-          </div>
+          </div>}
 
-          <div className="space-y-1.5">
-            <Label htmlFor="password">Senha</Label>
-            <Input
-              id="password"
-              type="password"
-              placeholder="••••••••"
-              minLength={6}
-              value={form.password}
-              onChange={(e) => setForm((current) => ({ ...current, password: e.target.value }))}
-              autoComplete={mode === "login" ? "current-password" : "new-password"}
-              required
-            />
-          </div>
+          {mode !== "forgot" && (
+            <div className="space-y-1.5">
+              <Label htmlFor="password">Senha</Label>
+              <div className="relative">
+                <Input
+                  id="password"
+                  type={showPassword ? "text" : "password"}
+                  placeholder="••••••••"
+                  minLength={6}
+                  value={form.password}
+                  onChange={(e) => setForm((current) => ({ ...current, password: e.target.value }))}
+                  autoComplete={mode === "login" ? "current-password" : "new-password"}
+                  className="pr-11"
+                  required
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((current) => !current)}
+                  className="absolute inset-y-0 right-0 flex w-11 items-center justify-center text-muted-foreground transition-colors hover:text-foreground"
+                  aria-label={showPassword ? "Ocultar senha" : "Mostrar senha"}
+                >
+                  {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </div>
+              {mode === "login" && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMode("forgot");
+                    setForm((current) => ({ ...current, password: "", confirmPassword: "" }));
+                  }}
+                  className="text-xs font-medium text-primary transition-colors hover:text-primary/80"
+                >
+                  Esqueci minha senha
+                </button>
+              )}
+            </div>
+          )}
 
-          {mode === "register" && (
+          {(mode === "register" || mode === "recovery") && (
             <div className="space-y-1.5">
               <Label htmlFor="confirmPassword">Confirmar senha</Label>
-              <Input
-                id="confirmPassword"
-                type="password"
-                placeholder="••••••••"
-                minLength={6}
-                value={form.confirmPassword}
-                onChange={(e) => setForm((current) => ({ ...current, confirmPassword: e.target.value }))}
-                autoComplete="new-password"
-                required={mode === "register"}
-              />
+              <div className="relative">
+                <Input
+                  id="confirmPassword"
+                  type={showConfirmPassword ? "text" : "password"}
+                  placeholder="••••••••"
+                  minLength={6}
+                  value={form.confirmPassword}
+                  onChange={(e) => setForm((current) => ({ ...current, confirmPassword: e.target.value }))}
+                  autoComplete="new-password"
+                  className="pr-11"
+                  required
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowConfirmPassword((current) => !current)}
+                  className="absolute inset-y-0 right-0 flex w-11 items-center justify-center text-muted-foreground transition-colors hover:text-foreground"
+                  aria-label={showConfirmPassword ? "Ocultar confirmação de senha" : "Mostrar confirmação de senha"}
+                >
+                  {showConfirmPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </div>
+              {mode === "recovery" && (
+                <p className="text-xs text-muted-foreground">
+                  Use uma senha diferente da senha atual ou temporária.
+                </p>
+              )}
             </div>
           )}
 
           <Button type="submit" className="w-full font-display font-semibold" disabled={loading}>
             {loading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-            {mode === "login" ? "Entrar" : "Criar conta"}
+            {mode === "login"
+              ? "Entrar"
+              : mode === "forgot"
+                ? "Enviar link de redefinição"
+                : mode === "recovery"
+                  ? "Salvar nova senha"
+                  : "Criar conta"}
           </Button>
+
+          {mode === "forgot" && (
+            <button
+              type="button"
+              onClick={() => setMode("login")}
+              className="w-full text-center text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+            >
+              Voltar para login
+            </button>
+          )}
         </form>
       </div>
     </div>

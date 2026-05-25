@@ -7,12 +7,12 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Settings,
-  Sparkles,
   TrendingUp,
   Upload,
   User,
 } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
+import { BrandLogo } from "@/components/BrandLogo";
 import { NavLink } from "@/components/NavLink";
 import { useAuth } from "@/contexts/AuthContext";
 import { maskEmail } from "@/lib/privacy";
@@ -64,28 +64,25 @@ export function AppSidebar() {
       className="border-none bg-transparent p-3 group-data-[collapsible=icon]:p-2"
     >
       <SidebarContent className="dashboard-panel overflow-hidden bg-sidebar/94">
-        <div className="relative border-b border-sidebar-border/70 px-4 py-5 group-data-[collapsible=icon]:px-2">
+        <div className="relative border-b border-sidebar-border/70 px-4 py-5 group-data-[collapsible=icon]:px-2 group-data-[collapsible=icon]:pb-3">
           <Link
             to="/"
             className={`flex items-center ${collapsed ? "justify-center" : "gap-3 pr-9"}`}
           >
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10 text-primary">
-              <Sparkles className="h-4.5 w-4.5" />
-            </div>
+            <BrandLogo
+              variant={collapsed ? "icon" : "full"}
+              className={collapsed ? "h-10 w-10 justify-center" : "h-12 min-w-0"}
+              imageClassName={collapsed ? "h-9 w-9 rounded-xl object-cover" : "h-11 w-auto max-w-[150px] object-contain"}
+            />
             {!collapsed && (
-              <div>
-                <p className="font-display text-lg font-bold tracking-tight text-foreground">
-                  Cardápio <span className="text-primary">Pro IA</span>
-                </p>
-                <p className="text-xs text-muted-foreground">Estúdio visual para delivery</p>
-              </div>
+              <span className="sr-only">Cardápio Pro IA</span>
             )}
           </Link>
           <button
             type="button"
             onClick={toggleSidebar}
             className={`absolute hidden h-9 w-9 items-center justify-center rounded-xl border border-sidebar-border/70 bg-background/50 text-muted-foreground transition-colors hover:bg-background/80 hover:text-foreground md:flex ${
-              collapsed ? "left-1/2 top-[4.25rem] -translate-x-1/2" : "right-4 top-5"
+              collapsed ? "left-1/2 top-[3.75rem] -translate-x-1/2" : "right-4 top-5"
             }`}
             aria-label={collapsed ? "Expandir menu lateral" : "Recolher menu lateral"}
             title={collapsed ? "Expandir menu" : "Recolher menu"}
@@ -94,12 +91,12 @@ export function AppSidebar() {
           </button>
         </div>
 
-        <SidebarGroup className={`px-2 pb-1 ${collapsed ? "pt-14" : "pt-3"}`}>
+        <SidebarGroup className={`px-2 pb-1 ${collapsed ? "pt-11" : "pt-3"}`}>
           <SidebarGroupLabel className="px-3 text-[11px] uppercase tracking-[0.24em] text-muted-foreground/60 font-semibold group-data-[collapsible=icon]:sr-only">
             Principal
           </SidebarGroupLabel>
           <SidebarGroupContent>
-            <SidebarMenu className="gap-1">
+            <SidebarMenu className={collapsed ? "gap-3" : "gap-1"}>
               {visibleMainItems.map((item) => (
                 <SidebarMenuItem key={item.title}>
                   <SidebarMenuButton
@@ -112,7 +109,7 @@ export function AppSidebar() {
                       end
                       title={collapsed ? item.title : undefined}
                       className={`group flex items-center rounded-xl border border-transparent text-sidebar-foreground ${
-                        collapsed ? "h-11 justify-center px-0 py-0" : "gap-3 px-3 py-2.5"
+                        collapsed ? "h-10 justify-center px-0 py-0" : "gap-3 px-3 py-2.5"
                       }`}
                       activeClassName="is-active bg-sidebar-accent/70 text-foreground"
                     >
@@ -132,9 +129,9 @@ export function AppSidebar() {
 
         {/* Afiliado */}
         {user && (
-          <SidebarGroup className="px-2 pt-0 pb-2 -mt-1">
+          <SidebarGroup className={`px-2 pb-2 ${collapsed ? "pt-3" : "pt-0 -mt-1"}`}>
             <SidebarGroupContent>
-              <SidebarMenu className="gap-1">
+              <SidebarMenu className={collapsed ? "gap-3" : "gap-1"}>
                 {affiliateItems.map((item) => (
                   <SidebarMenuItem key={item.title}>
                     <SidebarMenuButton
@@ -147,7 +144,7 @@ export function AppSidebar() {
                         end
                         title={collapsed ? item.title : undefined}
                         className={`group flex items-center rounded-xl border border-transparent text-sidebar-foreground ${
-                          collapsed ? "h-11 justify-center px-0 py-0" : "gap-3 px-3 py-2.5"
+                          collapsed ? "h-10 justify-center px-0 py-0" : "gap-3 px-3 py-2.5"
                         }`}
                         activeClassName="is-active bg-sidebar-accent/70 text-foreground"
                       >
